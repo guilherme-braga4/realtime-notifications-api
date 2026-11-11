@@ -17,8 +17,21 @@ Banco de dados --(mudança)--> Pub/Sub --> API --> WebSocket --> Clientes
 
 ## Stack
 
-Em definição. NestJS (TypeScript) é a opção em avaliação.
+- NestJS 12 + TypeScript (ESM)
+- Vitest (testes unitários e e2e)
+- Pub/Sub e WebSocket: a definir
+
+## Como rodar
+
+Requer Node.js 24+.
+
+```bash
+npm install
+npm run start:dev   # http://localhost:3000
+npm test            # testes unitários
+npm run test:e2e    # testes e2e
+```
 
 ## Status
 
-🚧 Em fase inicial.
+🚧 Em fase inicial: apenas o scaffold do NestJS.
