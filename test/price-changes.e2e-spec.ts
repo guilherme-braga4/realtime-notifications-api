@@ -158,8 +158,12 @@ describe('Price changes (e2e)', () => {
       '40.00',
     ]);
 
-    const lastId = recorded[recorded.length - 1].id;
-    await vi.waitFor(async () => expect(await savedCursor()).toBe(lastId));
+    // Outros testes gravam no mesmo banco em paralelo, então o cursor pode já
+    // estar além do último evento deste produto, mas nunca antes dele.
+    const lastId = BigInt(recorded[recorded.length - 1].id);
+    await vi.waitFor(async () =>
+      expect(BigInt((await savedCursor()) ?? 0)).toBeGreaterThanOrEqual(lastId),
+    );
   });
 
   it('keeps numeric order when ids gain a digit (9 -> 10, 99 -> 100)', async () => {
@@ -198,7 +202,11 @@ describe('Price changes (e2e)', () => {
     await setPrice('37.00');
     await vi.waitFor(() => expect(received).toHaveLength(1));
     const [before] = await recordedChanges();
-    await vi.waitFor(async () => expect(await savedCursor()).toBe(before.id));
+    await vi.waitFor(async () =>
+      expect(BigInt((await savedCursor()) ?? 0)).toBeGreaterThanOrEqual(
+        BigInt(before.id),
+      ),
+    );
 
     // Com a API "fora": o trigger grava, ninguém escuta.
     await moduleRef.close();

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preços em tempo real</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --text: #16181d;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --down: #0a8f4f;
+        --up: #c2372d;
+        --best: #e8f7ee;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115;
+          --card: #181b21;
+          --text: #e8eaed;
+          --muted: #9aa1ac;
+          --line: #2a2f38;
+          --down: #3ecf8e;
+          --up: #ff7b72;
+          --best: #14301f;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px 16px 48px;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      main { max-width: 1100px; margin: 0 auto; }
+      header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 20px; }
+      h1 { margin: 0; font-size: 22px; }
+      h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+      #status { font-size: 13px; color: var(--muted); }
+      #status::before { content: '●'; margin-right: 6px; color: var(--up); }
+      #status.online::before { color: var(--down); }
+      #count { margin-left: auto; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+      @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+      .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+      .scroll { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+      th, td { padding: 9px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+      th { font-size: 12px; color: var(--muted); font-weight: 600; }
+      th:first-child, td:first-child { text-align: left; }
+      tr:last-child td { border-bottom: 0; }
+      td.best { background: var(--best); font-weight: 600; }
+      td.down { animation: down 1.2s ease-out; }
+      td.up { animation: up 1.2s ease-out; }
+      @keyframes down { from { background: var(--down); color: #fff; } }
+      @keyframes up { from { background: var(--up); color: #fff; } }
+      #feed { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+      #feed li { padding: 7px 0; border-bottom: 1px solid var(--line); }
+      #feed li:last-child { border-bottom: 0; }
+      #feed .who { color: var(--muted); }
+      .down-text { color: var(--down); }
+      .up-text { color: var(--up); }
+      .empty { color: var(--muted); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Preços em tempo real</h1>
+        <span id="status">conectando…</span>
+        <span id="count">0 mudanças recebidas</span>
+      </header>
+      <div class="layout">
+        <section class="card">
+          <h2>Preço por loja</h2>
+          <div class="scroll"><table id="prices"></table></div>
+          <p class="empty" id="empty" hidden>Nenhum produto ainda. Rode <code>npm run simulate</code>.</p>
+        </section>
+        <section class="card">
+          <h2>Últimas mudanças</h2>
+          <ul id="feed"><li class="empty">Aguardando mudanças…</li></ul>
+        </section>
+      </div>
+    </main>
+    <script>
+      const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+      const table = document.getElementById('prices');
+      const feed = document.getElementById('feed');
+      const statusEl = document.getElementById('status');
+      const countEl = document.getElementById('count');
+      const cells = new Map(); // id do produto -> <td>
+      const prices = new Map(); // id do produto -> { name, price }
+      let received = 0;
+
+      function renderTable(products) {
+        cells.clear();
+        prices.clear();
+        const stores = [...new Set(products.map((p) => p.store))].sort();
+        const names = [...new Set(products.map((p) => p.name))].sort();
+        table.replaceChildren();
+        document.getElementById('empty').hidden = products.length > 0;
+        if (products.length === 0) return;
+
+        const head = table.createTHead().insertRow();
+        for (const title of ['Produto', ...stores]) {
+          const th = document.createElement('th');
+          th.textContent = title;
+          head.append(th);
+        }
+        const body = table.createTBody();
+        for (const name of names) {
+          const row = body.insertRow();
+          row.insertCell().textContent = name;
+          for (const store of stores) {
+            const cell = row.insertCell();
+            const product = products.find((p) => p.name === name && p.store === store);
+            if (!product) {
+              cell.textContent = '—';
+              continue;
+            }
+            cell.textContent = brl.format(product.price);
+            cells.set(product.id, cell);
+            prices.set(product.id, { name, price: Number(product.price) });
+          }
+        }
+        for (const name of names) markBest(name);
+      }
+
+      // Destaca o menor preço de cada produto.
+      function markBest(name) {
+        const ids = [...prices].filter(([, p]) => p.name === name).map(([id]) => id);
+        const best = Math.min(...ids.map((id) => prices.get(id).price));
+        for (const id of ids) {
+          cells.get(id).classList.toggle('best', prices.get(id).price === best);
+        }
+      }
+
+      function applyChange(change) {
+        const cell = cells.get(change.productId);
+        const direction = Number(change.newPrice) < Number(change.oldPrice) ? 'down' : 'up';
+        if (cell) {
+          prices.get(change.productId).price = Number(change.newPrice);
+          cell.textContent = brl.format(change.newPrice);
+          cell.classList.remove('down', 'up');
+          void cell.offsetWidth; // reinicia a animação
+          cell.classList.add(direction);
+          markBest(change.name);
+        }
+
+        if (received === 0) feed.replaceChildren();
+        const item = document.createElement('li');
+        const who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = `${change.store} · ${new Date(change.changedAt).toLocaleTimeString('pt-BR')}`;
+        const what = document.createElement('div');
+        const arrow = document.createElement('span');
+        arrow.className = `${direction}-text`;
+        arrow.textContent = `${direction === 'down' ? '▼' : '▲'} ${brl.format(change.newPrice)}`;
+        what.append(`${change.name} `, arrow);
+        item.append(who, what);
+        feed.prepend(item);
+        while (feed.children.length > 20) feed.lastChild.remove();
+
+        received += 1;
+        countEl.textContent = `${received} mudanças recebidas`;
+      }
+
+      function connect() {
+        const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+        const socket = new WebSocket(`${protocol}://${location.host}/ws`);
+        socket.onopen = () => {
+          statusEl.textContent = 'conectado';
+          statusEl.className = 'online';
+        };
+        socket.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'snapshot') renderTable(message.products);
+          if (message.type === 'price_change') applyChange(message.change);
+        };
+        socket.onclose = () => {
+          statusEl.textContent = 'desconectado, reconectando…';
+          statusEl.className = '';
+          setTimeout(connect, 1000); // o snapshot da reconexão repõe o estado
+        };
+      }
+      connect();
+    </script>
+  </body>
+</html>

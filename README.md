@@ -7,7 +7,7 @@ Backend real-time com Pub/Sub + WebSocket.
 Notificar clientes conectados, em tempo real, sempre que um evento no banco de dados é atualizado.
 
 ```
-Banco de dados --(mudança)--> Pub/Sub --> API --> WebSocket --> Clientes
+Postgres --(trigger + outbox + NOTIFY)--> API --> WebSocket --> Navegador
 ```
 
 ## Contexto
@@ -20,7 +20,8 @@ Banco de dados --(mudança)--> Pub/Sub --> API --> WebSocket --> Clientes
 - NestJS 12 + TypeScript (ESM)
 - Vitest (testes unitários e e2e)
 - PostgreSQL 18 (Docker), acessado com `pg`
-- Pub/Sub e WebSocket: a definir
+- Pub/Sub: LISTEN/NOTIFY do Postgres (sem broker)
+- WebSocket: `@nestjs/websockets` com `ws`
 
 ## Como rodar
 
@@ -30,7 +31,7 @@ Requer Node.js 24+ e Docker.
 cp .env.example .env
 docker compose up -d --wait   # Postgres em localhost:5432
 npm install
-npm run start:dev             # http://localhost:3000
+npm run start:dev             # http://localhost:3000 (página de preços)
 npm test                      # testes unitários
 npm run test:e2e              # testes e2e (precisam do Postgres no ar)
 ```
@@ -79,6 +80,24 @@ select * from price_changes order by id desc limit 20;
 select * from consumer_cursors;
 ```
 
+## WebSocket e página de preços
+
+Abra `http://localhost:3000` com a API no ar e rode `npm run simulate`: a tabela mostra o preço de cada produto por loja, destaca o menor e pisca a cada mudança.
+
+O gateway fica em `ws://localhost:3000/ws` e só envia mensagens (JSON):
+
+```jsonc
+// ao conectar: preço atual de todos os produtos
+{ "type": "snapshot", "lastEventId": "489", "products": [{ "id": 23, "name": "Air Fryer 5L", "store": "Shopee", "price": "370.81", "updatedAt": "..." }] }
+// a cada mudança, em ordem
+{ "type": "price_change", "change": { "id": "490", "productId": 23, "name": "Air Fryer 5L", "store": "Shopee", "oldPrice": "370.81", "newPrice": "352.10", "changedAt": "..." } }
+```
+
+- **Sem buraco nem repetição entre snapshot e fluxo:** o cliente é registrado antes da leitura do snapshot, as mudanças que chegam nesse intervalo ficam em fila, e só passam as com `id` maior que o `lastEventId` do snapshot.
+- **Reconexão:** o cliente reconecta e recebe um snapshot novo, que repõe o estado; não há reenvio de eventos perdidos por cliente.
+- **Clientes lentos ou mortos:** quem acumula 1 MB sem ler é desconectado, e um ping a cada 30s derruba conexões que não respondem.
+- Ainda não há autenticação nem filtro por produto: todo cliente recebe todas as mudanças.
+
 ## Simulador de preços
 
 Enquanto não há integração com lojas reais, um script simula a Black Friday alterando preços em rajadas na tabela `products`.
@@ -115,4 +134,4 @@ Resultados em 12/11/2026 (MacBook de 10 núcleos, Postgres 18 no Docker Desktop,
 
 ## Status
 
-🚧 Em fase inicial: a API captura mudanças de preço do Postgres. Pub/Sub e WebSocket ainda não existem.
+🚧 Em fase inicial: mudanças de preço simuladas chegam ao navegador em tempo real. Ainda não há lojas reais, autenticação nem deploy.
