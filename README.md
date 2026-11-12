@@ -93,6 +93,26 @@ Com a API no ar, cada mudança aparece no log:
 [PriceChangeListener] Price changed: [Shopee] Air Fryer 5L 379.83 -> 370.81 (event 463, product 23)
 ```
 
+## Teste de estresse
+
+Escritores em paralelo mudam preços e o script mede quanto tempo cada mudança leva do `UPDATE` até sair em `changes$`. Roda em um banco próprio (`realtime_notifications_stress_test`), com a API em processo e sem logs por evento.
+
+```bash
+npm run stress -- 50 20000   # 50 escritores, 20.000 mudanças no total
+```
+
+Resultados em 12/11/2026 (MacBook de 10 núcleos, Postgres 18 no Docker Desktop, uma execução por cenário):
+
+| Escritores | Mudanças/s | UPDATE p50 / p99 | UPDATE → `changes$` p50 / p99 | Perdidos / fora de ordem |
+|---|---|---|---|---|
+| 1 | 598 | 0,8 / 11,7 ms | 1,5 / 19,2 ms | 0 / 0 |
+| 10 | 1.091 | 7,0 / 39,5 ms | 8,0 / 43,7 ms | 0 / 0 |
+| 50 | 1.239 | 32,0 / 149,1 ms | 32,9 / 152,8 ms | 0 / 0 |
+| 90 | 947 | 61,7 / 547,4 ms | 62,6 / 548,4 ms | 0 / 0 |
+
+- A entrega acrescenta cerca de 1 ms ao tempo da própria escrita, em qualquer carga.
+- A vazão para de crescer por volta de 1.200 mudanças/s: mais escritores só aumentam a fila. O gargalo está na escrita, não no listener.
+
 ## Status
 
 🚧 Em fase inicial: a API captura mudanças de preço do Postgres. Pub/Sub e WebSocket ainda não existem.
