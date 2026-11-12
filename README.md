@@ -35,6 +35,8 @@ npm test                      # testes unitários
 npm run test:e2e              # testes e2e (precisam do Postgres no ar)
 ```
 
+Os testes e2e usam um banco próprio, `realtime_notifications_test`, criado e limpo automaticamente a cada execução. Eles não tocam no banco da API local.
+
 Ao subir, a API registra no log a conexão com o banco:
 
 ```
@@ -44,17 +46,37 @@ Ao subir, a API registra no log a conexão com o banco:
 ## Captura de mudanças de preço
 
 ```
-UPDATE em products --> trigger --> pg_notify('price_changed') --> PriceChangeListener --> changes$
+UPDATE em products
+  └─ trigger (mesma transação)
+       ├─ INSERT em price_changes        ← o evento, durável
+       └─ NOTIFY price_changed           ← só o aviso "há eventos novos"
+            └─ PriceChangeListener lê price_changes depois do cursor → changes$
 ```
 
-- `db/schema.sql` cria a tabela `products` e um trigger que publica cada mudança de preço no canal `price_changed` (LISTEN/NOTIFY).
-- `PriceChangeListener` escuta o canal em uma conexão dedicada, valida o payload, registra no log e expõe as mudanças no observable `changes$`.
-- Se a conexão cair, o listener reconecta com backoff exponencial (1s a 30s). LISTEN/NOTIFY não guarda mensagens: o que for publicado durante a queda não é entregue.
+| Tabela | Papel | Como muda |
+|---|---|---|
+| `products` | Estado atual (preço de agora) | `update` a cada mudança |
+| `price_changes` | Log de eventos e histórico de preços | Só `insert`, feito pelo trigger |
+| `consumer_cursors` | Até onde cada consumidor leu | `update` de uma linha por consumidor |
 
-O schema é aplicado automaticamente quando o volume do Postgres é criado. Em um banco já existente:
+- **Sem broker:** o Postgres faz o papel de Pub/Sub (LISTEN/NOTIFY) e de outbox (`price_changes`).
+- **Nada se perde em quedas:** ao conectar ou reconectar (backoff de 1s a 30s), o listener lê tudo o que está depois do cursor.
+- **Ordem garantida:** o trigger serializa as transações que mudam preço com um advisory lock, para que a ordem dos ids seja a ordem de commit. O custo é que mudanças de preço não são gravadas em paralelo.
+- **Entrega "pelo menos uma vez":** se a API cair entre emitir um lote e salvar o cursor, o lote é reemitido ao reiniciar. Consumidores devem usar o `id` do evento para ignorar repetidos.
+- **Primeira execução:** um consumidor novo começa no último evento existente; o histórico anterior não é reenviado.
+- O nome do consumidor vem de `PRICE_CHANGES_CONSUMER` (padrão: `price-change-listener`).
+
+O schema (`db/schema.sql`) é aplicado automaticamente quando o volume do Postgres é criado. Em um banco já existente:
 
 ```bash
 npm run db:setup
+```
+
+Para ver os eventos gravados:
+
+```sql
+select * from price_changes order by id desc limit 20;
+select * from consumer_cursors;
 ```
 
 ## Simulador de preços
@@ -68,7 +90,7 @@ npm run simulate   # Ctrl+C para parar
 Com a API no ar, cada mudança aparece no log:
 
 ```
-[PriceChangeListener] Price changed: [Shopee] Air Fryer 5L 398.70 -> 379.83 (product 23)
+[PriceChangeListener] Price changed: [Shopee] Air Fryer 5L 379.83 -> 370.81 (event 463, product 23)
 ```
 
 ## Status
