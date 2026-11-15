@@ -40,7 +40,7 @@ export default async function setup() {
   try {
     await client.query(readFileSync('db/schema.sql', 'utf8'));
     await client.query(
-      'truncate products, price_changes, consumer_cursors restart identity cascade',
+      'truncate products, metrics, stocks, news, events, consumer_cursors restart identity cascade',
     );
   } finally {
     await client.end();

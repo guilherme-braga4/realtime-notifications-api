@@ -1,6 +1,6 @@
 // Teste de estresse: N escritores mudam preços em paralelo e medimos quanto
-// tempo cada mudança leva para sair em changes$ (o ponto onde o WebSocket vai
-// se ligar). Roda em um banco próprio, com a API em processo (a partir de dist/).
+// tempo cada mudança leva para sair em events$ (o ponto onde o WebSocket se
+// liga). Roda em um banco próprio, com a API em processo (a partir de dist/).
 // Uso: npm run stress -- <escritores> <mudanças no total>
 import { Pool } from 'pg';
 
@@ -12,7 +12,7 @@ const databaseUrl =
   'postgres://postgres:postgres@localhost:5432/realtime_notifications_stress_test';
 process.env.TEST_DATABASE_URL = databaseUrl;
 process.env.DATABASE_URL = databaseUrl;
-process.env.PRICE_CHANGES_CONSUMER = 'stress';
+process.env.EVENTS_CONSUMER = 'stress';
 
 // Cria o banco, aplica o schema e limpa os dados (mesmo setup dos testes e2e).
 const { default: setupDatabase } = await import('../test/test-database.ts');
@@ -27,8 +27,7 @@ await pool.query(
 
 const { NestFactory } = await import('@nestjs/core');
 const { AppModule } = await import('../dist/app.module.js');
-const { PriceChangeListener } =
-  await import('../dist/price-changes/price-change.listener.js');
+const { EventsListener } = await import('../dist/events/events.listener.js');
 // Sem logs: um log por evento no terminal distorceria a medição.
 const app = await NestFactory.createApplicationContext(AppModule, {
   logger: ['error', 'warn'],
@@ -44,17 +43,17 @@ const seen = new Set<string>();
 let allReceived = () => {};
 const done = new Promise<void>((resolve) => (allReceived = resolve));
 
-app.get(PriceChangeListener).changes$.subscribe((change) => {
+app.get(EventsListener).events$.subscribe((event) => {
   const now = performance.now();
-  if (seen.has(change.id)) {
+  if (seen.has(event.id)) {
     duplicates++;
     return;
   }
-  seen.add(change.id);
-  if (BigInt(change.id) < lastId) outOfOrder++;
-  lastId = BigInt(change.id);
+  seen.add(event.id);
+  if (BigInt(event.id) < lastId) outOfOrder++;
+  lastId = BigInt(event.id);
 
-  const sent = sentAt.get(`${change.productId}:${change.newPrice}`);
+  const sent = sentAt.get(`${event.key}:${event.item.price}`);
   if (sent !== undefined) endToEndMs.push(now - sent);
   if (seen.size === total) allReceived();
 });
@@ -95,7 +94,7 @@ console.log(`
 Escrita:    ${(total / writeSeconds).toFixed(0)} mudanças/s (${writeSeconds.toFixed(2)}s)
 Entrega:    ${(seen.size / totalSeconds).toFixed(0)} eventos/s (${totalSeconds.toFixed(2)}s até o último)
 UPDATE (ms):            ${summary(writeMs)}
-UPDATE -> changes$ (ms): ${summary(endToEndMs)}
+UPDATE -> events$ (ms):  ${summary(endToEndMs)}
 Recebidos: ${seen.size}/${total}   perdidos: ${total - seen.size}   repetidos: ${duplicates}   fora de ordem: ${outOfOrder}
 `);
 

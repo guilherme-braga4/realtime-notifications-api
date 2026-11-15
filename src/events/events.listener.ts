@@ -8,25 +8,24 @@ import { ConfigService } from '@nestjs/config';
 import { Client } from 'pg';
 import { Observable, Subject } from 'rxjs';
 import { DatabaseService } from '../database/database.service.js';
-import { PRICE_CHANGED_CHANNEL, PriceChange } from './price-change.js';
+import { EVENTS_CHANNEL, Item, TopicEvent } from './topic-event.js';
 
-const DEFAULT_CONSUMER = 'price-change-listener';
+const DEFAULT_CONSUMER = 'events-listener';
 const BATCH_SIZE = 500;
 const INITIAL_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 30_000;
 
-interface PriceChangeRow {
+interface EventRow {
   id: string;
-  product_id: number;
-  name: string;
-  store: string;
-  old_price: string;
-  new_price: string;
-  changed_at: Date;
+  topic: string;
+  key: string;
+  item: Item;
+  previous: Item | null;
+  created_at: Date;
 }
 
 /**
- * Entrega em `changes$`, em ordem, os eventos da tabela `price_changes`.
+ * Entrega em `events$`, em ordem, os eventos da tabela `events`.
  *
  * - A tabela é a fonte dos eventos. O NOTIFY do Postgres, recebido em uma
  *   conexão dedicada (LISTEN exige conexão persistente, fora do pool), é só o
@@ -37,16 +36,14 @@ interface PriceChangeRow {
  *   gravados durante uma queda não se perdem.
  * - A entrega é "pelo menos uma vez": se o processo cair entre emitir um lote
  *   e salvar o cursor, o lote é emitido de novo ao reiniciar. Quem consome
- *   deve usar `PriceChange.id` para ignorar repetidos.
+ *   deve usar `TopicEvent.id` para ignorar repetidos.
  * - Na primeira execução de um consumidor, o cursor começa no último evento
  *   existente: o histórico anterior não é reenviado.
  */
 @Injectable()
-export class PriceChangeListener
-  implements OnApplicationBootstrap, OnModuleDestroy
-{
-  private readonly logger = new Logger(PriceChangeListener.name);
-  private readonly changes = new Subject<PriceChange>();
+export class EventsListener implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(EventsListener.name);
+  private readonly events = new Subject<TopicEvent>();
   private readonly consumer: string;
   private cursor = '0';
   private client?: Client;
@@ -57,17 +54,17 @@ export class PriceChangeListener
   private drainRequested = false;
   private closing = false;
 
-  readonly changes$: Observable<PriceChange> = this.changes.asObservable();
+  readonly events$: Observable<TopicEvent> = this.events.asObservable();
 
   constructor(
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
   ) {
     this.consumer =
-      this.config.get<string>('PRICE_CHANGES_CONSUMER') ?? DEFAULT_CONSUMER;
+      this.config.get<string>('EVENTS_CONSUMER') ?? DEFAULT_CONSUMER;
   }
 
-  // Começa só depois de todos os módulos iniciarem: quem assina `changes$` no
+  // Começa só depois de todos os módulos iniciarem: quem assina `events$` no
   // próprio onModuleInit não perde os eventos lidos na partida.
   async onApplicationBootstrap() {
     this.cursor = await this.loadCursor();
@@ -81,7 +78,7 @@ export class PriceChangeListener
     this.closing = true;
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.drainRetryTimer);
-    this.changes.complete();
+    this.events.complete();
 
     const client = this.client;
     this.client = undefined;
@@ -92,7 +89,7 @@ export class PriceChangeListener
   private async loadCursor(): Promise<string> {
     const { rows } = await this.db.pool.query<{ last_id: string }>(
       `insert into consumer_cursors (consumer, last_id)
-       values ($1, (select coalesce(max(id), 0) from price_changes))
+       values ($1, (select coalesce(max(id), 0) from events))
        on conflict (consumer) do update set consumer = excluded.consumer
        returning last_id::text`,
       [this.consumer],
@@ -113,16 +110,14 @@ export class PriceChangeListener
 
     try {
       await client.connect();
-      await client.query(`LISTEN ${PRICE_CHANGED_CHANNEL}`);
+      await client.query(`LISTEN ${EVENTS_CHANNEL}`);
     } catch (error) {
       this.handleDisconnect(client, (error as Error).message);
       return;
     }
 
     this.failedAttempts = 0;
-    this.logger.log(
-      `Listening for price changes on channel "${PRICE_CHANGED_CHANNEL}"`,
-    );
+    this.logger.log(`Listening for events on channel "${EVENTS_CHANNEL}"`);
     // Só depois do LISTEN: assim nada gravado entre a leitura e o LISTEN fica
     // sem aviso. Cobre também o que foi gravado enquanto estávamos fora.
     await this.drain();
@@ -148,7 +143,7 @@ export class PriceChangeListener
     } catch (error) {
       if (!this.closing) {
         this.logger.error(
-          `Failed to read price changes (${(error as Error).message}); retrying in ${INITIAL_RETRY_MS}ms`,
+          `Failed to read events (${(error as Error).message}); retrying in ${INITIAL_RETRY_MS}ms`,
         );
         this.drainRetryTimer = setTimeout(
           () => void this.drain(),
@@ -162,12 +157,12 @@ export class PriceChangeListener
 
   /** Entrega um lote e salva o cursor. Retorna quantos eventos entregou. */
   private async deliverNextBatch(): Promise<number> {
-    const { rows } = await this.db.pool.query<PriceChangeRow>(
-      `select id::text, product_id, name, store,
-              old_price::text, new_price::text, changed_at
-         from price_changes
+    const { rows } = await this.db.pool.query<EventRow>(
+      `select id::text, topic, key, item, previous, created_at
+         from events
         where id > $1
-        order by id
+        -- "order by id" ordenaria pela coluna de saída (texto): '10' < '9'.
+        order by events.id
         limit $2`,
       [this.cursor, BATCH_SIZE],
     );
@@ -176,17 +171,14 @@ export class PriceChangeListener
     }
 
     for (const row of rows) {
-      this.logger.log(
-        `Price changed: [${row.store}] ${row.name} ${row.old_price} -> ${row.new_price} (event ${row.id}, product ${row.product_id})`,
-      );
-      this.changes.next({
+      this.logger.log(`Event ${row.id}: ${row.topic}/${row.key}`);
+      this.events.next({
         id: row.id,
-        productId: row.product_id,
-        name: row.name,
-        store: row.store,
-        oldPrice: row.old_price,
-        newPrice: row.new_price,
-        changedAt: row.changed_at.toISOString(),
+        topic: row.topic,
+        key: row.key,
+        item: row.item,
+        previous: row.previous,
+        at: row.created_at.toISOString(),
       });
     }
 
@@ -216,7 +208,7 @@ export class PriceChangeListener
     );
     this.failedAttempts += 1;
     this.logger.error(
-      `Price change listener disconnected (${reason}); retrying in ${delay}ms`,
+      `Events listener disconnected (${reason}); retrying in ${delay}ms`,
     );
     this.reconnectTimer = setTimeout(() => void this.connect(), delay);
   }
